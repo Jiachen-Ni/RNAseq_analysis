@@ -1,0 +1,332 @@
+#!/usr/bin/bash
+
+# Defining paths to required directories and files
+#User can enter the path they need
+#Or they can press ENTER to read the default path
+
+# Path to the directory containing raw sequence read files (.fq.gz format)
+echo "--------------------------------------"
+echo "Please enter the path of the DIRECTORY containing raw sequence read files (.fq.gz format):"
+echo "Pressing Enter will read the default path: /localdisk/data/BPSM/ICA1/fastq"
+read sample_path
+if [ -z "$sample_path" ]; then
+	sample_path="/localdisk/data/BPSM/ICA1/fastq"
+fi
+
+# Path to the BED format file.
+echo "--------------------------------------"
+echo "Please enter the path of the BED format FILE (.bed format):"
+echo "Pressing Enter will read the default path: /localdisk/data/BPSM/ICA1/TriTrypDB-46_TcongolenseIL3000_2019.bed"
+read bed_path
+if [ -z "$bed_path" ]; then
+	bed_path="/localdisk/data/BPSM/ICA1/TriTrypDB-46_TcongolenseIL3000_2019.bed"
+fi
+
+# Path to a sample details file which contains sample groups information.
+echo "--------------------------------------"
+echo "Please enter the the path of the sample details file which contains sample group information format file (.fqfiles format):"
+echo "Pressing Enter will read the default path: /localdisk/data/BPSM/ICA1/fastq/Tco2.fqfiles"
+read detail_path
+if [ -z "$detail_path" ]; then
+	detail_path="/localdisk/data/BPSM/ICA1/fastq/Tco2.fqfiles"
+fi
+
+# Path to the directory containing the gene sequence file.
+echo "--------------------------------------"
+echo "Please enter the the path of the DIRECTORY which contains the gene sequence file (.fasta.gz format):"
+echo "Pressing Enter will read the default path: /localdisk/data/BPSM/ICA1/Tcongo_genome"
+read index_path
+if [ -z "$index_path" ]; then
+	index_path="/localdisk/data/BPSM/ICA1/Tcongo_genome"
+fi
+
+#### Quality check using FastQC tool
+# Create an output directory if it doesn't exist
+fastqc_output="./fastqc_result"
+[[ ! -d "$fastqc_output" ]] && mkdir "$fastqc_output"
+# Run FastQC tool to check the quality of sequence reads in the sample_path
+fastqc -o "$fastqc_output" "$sample_path"/*.fq.gz
+
+# Create and initialize a file to store a summary of FastQC results
+echo "FastQC Summary Results" > "$fastqc_output"/fastqc_summary_results.txt
+echo "-------------------------" >> "$fastqc_output"/fastqc_summary_results.txt
+
+# Iterate through each zip file produced by FastQC
+for zipfile in "$fastqc_output"/*.zip; do
+	# Extract the summary.txt from the zipped FastQC output
+ 	unzip -p "$zipfile" "*/summary.txt" > "$fastqc_output"/temp_summary.txt
+	# Count how many entries passed the quality checks
+ 	PASS_COUNT=$(grep -c "PASS" "$fastqc_output"/temp_summary.txt)
+ 	# Count how many entries had warnings in quality checks
+ 	WARN_COUNT=$(grep -c "WARN" "$fastqc_output"/temp_summary.txt)
+	# Count how many entries failed the quality checks
+ 	FAIL_COUNT=$(grep -c "FAIL" "$fastqc_output"/temp_summary.txt)
+  	# Append the counts to the summary results file
+  	echo "File: $zipfile" >> "$fastqc_output"/fastqc_summary_results.txt
+  	echo "PASS count: $PASS_COUNT" >> "$fastqc_output"/fastqc_summary_results.txt
+  	echo "WARN count: $WARN_COUNT" >> "$fastqc_output"/fastqc_summary_results.txt
+  	echo "FAIL count: $FAIL_COUNT" >> "$fastqc_output"/fastqc_summary_results.txt
+  	echo "-------------------------" >> "$fastqc_output"/fastqc_summary_results.txt
+done
+
+# Remove the temporary file used for the FastQC summary
+rm -f "$fastqc_output"/temp_summary.txt
+#### End of FastQC quality check
+
+#### Start mapping sequence reads to reference genome using Bowtie2
+# Create output directory for Bowtie2 results if it doesn't exist
+bowtie2_output="./bowtie2_result"
+[ ! -d "bowtie2_result" ] && mkdir "$bowtie2_output"
+
+# Building the index for the genome using Bowtie2 for efficient read mapping
+bowtie2-build "$index_path"/* "$bowtie2_output"/Tcongo_index
+
+# Iterate through each sample's forward reads in the sample_path
+for sample in "$sample_path"/*_1.fq.gz; do
+	# Extract the base name to identify paired reads
+	name=$(basename "$sample" _1.fq.gz)
+	sample2="$sample_path/${name}_2.fq.gz"
+	# Map the paired reads to the genome and save the output as a SAM file
+	bowtie2 -x "$bowtie2_output"/Tcongo_index -1 "$sample" -2 "$sample2" -S "${bowtie2_output}/${name}.sam"
+done
+#### End of Bowtie2 mapping
+
+#### Converting SAM file outputs from Bowtie2 to indexed BAM format using Samtools
+echo "---------------------------------------"
+echo "Samtools is creating indexed bam format"
+echo "......"
+
+# Create a directory to store the BAM files if it doesn't exist
+[ ! -d "bam" ] && mkdir bam
+
+# Iterate through each SAM file from Bowtie2 output
+for samfile in ${bowtie2_output}/*.sam; do
+	# Extract the base name of the SAM file
+	samname=$(basename "$samfile" .sam)
+	# Convert SAM to BAM format
+	samtools view -bS "${samfile}" > "./bam/${samname}.bam"
+	# Sort the BAM files
+	samtools sort "./bam/${samname}.bam" -o "./bam/${samname}_sorted.bam"
+	# Create an index for the sorted BAM files
+	samtools index "./bam/${samname}_sorted.bam"
+done
+echo "Samtools has finished its works in bam folder"
+echo " "
+#### End of Samtools
+
+#### Begin Bedtools analysis
+echo "--------------------------------------"
+echo "Bedtools is genareting the number data"
+echo "......"
+
+# Create a directory for the Bedtools outputs if it doesn't exist
+[ ! -d "bed_counts" ] && mkdir bed_counts
+
+# Iterate through each sorted BAM file
+for bamfile in ./bam/*_sorted.bam; do
+	bamname=$(basename "$bamfile" _sorted.bam)
+	 # Use Bedtools to get counts of reads overlapping the regions in the bed file
+	bedtools multicov -bams "$bamfile" -bed "$bed_path" > "./bed_counts/${bamname}_counts.txt"
+done
+echo "Congratulation! the number data genarated in bed_counts folder"
+echo " "
+####finish Bedtools analysis
+
+#### Organizing the Bedtools outputs into groups based on data in 'detail_path' file
+# Read through the detail file, line by line
+while IFS=$'\t' read -r SampleName SampleType Replicate Time Treatment End1 End2; do
+	# Skip the header line
+	if [ "$SampleName" != "SampleName" ] ; then
+		# Define the group based on sample type, treatment, and time
+		group_name="${SampleType}_${Treatment}_${Time}"
+		# Create a directory for this group if it doesn't exist
+		[ ! -d "./bed_counts/$group_name" ] && mkdir "./bed_counts/$group_name"
+		# Generate a unique file name based on SampleName
+		files_name="$(echo $SampleName | cut -c 1-3)-$(echo $SampleName | cut -c4-)"
+		# Move the corresponding count file to its group directory
+		mv -f "./bed_counts/${files_name}_counts.txt" "./bed_counts/$group_name"
+	fi
+done < "$detail_path"
+#### End of organizing groups
+
+
+#### Begin generating statistical mean of the counts across samples in a group
+echo "------------------------------------------------------"
+echo "I'm generating statistical mean of the counts for you!"
+echo "......"
+
+#Prepare for the input of counts numbers
+counts_path="./bed_counts"
+
+# Create a directory to store the mean count outputs if it doesn't exist
+[ ! -d "mean_counts" ] && mkdir mean_counts
+
+# Iterate through each group in the bed_counts directory
+for group in $counts_path/*; do
+	group_name=$(basename "$group")
+	# Extract individual count files from the group directory
+	group_files=($group/*_counts.txt)
+	# Create a directory for this group's mean counts if it doesn't exist
+	[ ! -d "./mean_counts/$group_name" ] && mkdir ./mean_counts/$group_name
+	#Prepare for the output of the mean counts
+	output_files=./mean_counts/$group_name/"${group_name}_mean_counts.txt"
+
+	# Use awk to process the individual count files and compute the mean counts
+	awk '
+		BEGIN {FS="\t"}
+		NR==FNR {gene_desc[$1"\t"$2"\t"$3"\t"$4]=$5; next}
+		{gene_counts[$1"\t"$2"\t"$3"\t"$4]+=$6; gene_samples[$1"\t"$2"\t"$3"\t"$4]++}
+		END {
+	    	for (gene in gene_counts){
+			mean_count = gene_counts[gene] / gene_samples[gene];
+			print gene"\t"gene_desc[gene]"\t"mean_count;
+		    }
+		}
+	' "$bed_path" "${group_files[@]}" > $output_files
+done
+
+echo "Statistical mean of the counts have been generated!"
+echo " "
+#### End of generating mean counts
+
+#### Initialize the process of calculating fold changes for the data.
+echo "--------------------------------"
+echo "I'm calculating the fold changes"
+echo "......"
+
+# Define the path to the mean counts data.
+mean_path="./mean_counts"
+# Create a directory to store fold change results if it doesn't exist.
+[ ! -d "fold_changes" ] && mkdir fold_changes
+
+# Begin the outer loop that will iterate over each group in the mean counts data.
+for group1 in "$mean_path"/*; do
+	group1_name=$(basename "$group1")
+	# Extract specific descriptors from the group name.
+	group1_type=$(echo "$group1_name" | cut -d "_" -f 1)
+	group1_treat=$(echo "$group1_name" | cut -d "_" -f 2)
+	group1_time=$(echo "$group1_name" | cut -d "_" -f 3)
+
+	# Begin the inner loop to compare every pair of groups.
+	for group2 in $mean_path/*; do
+		group2_name=$(basename "$group2")
+		# Extract specific descriptors from the second group name.
+       		group2_type=$(echo "$group2_name" | cut -d "_" -f 1)
+		group2_treat=$(echo "$group2_name" | cut -d "_" -f 2)
+		group2_time=$(echo "$group2_name" | cut -d "_" -f 3)
+
+		# First comparison situation: Same type and treatment, different time.
+		if [[ "$group1_type" == "$group2_type" ]] && [[ "$group1_treat" == "$group2_treat" ]] && [[ "$group1_time" != "$group2_time" ]]
+		then
+			fold_path="./fold_changes/${group1_type}_${group1_treat}"
+
+			# Decide the direction of the fold based on time progression.
+			# Make sure that the direction is from less time (like 24h) to more time (like 48h)
+			if [[ "$group1_time" < "$group2_time" ]]
+			then
+				fold_name="${group1_type}_${group1_treat}_from_${group1_time}_to_${group2_time}"
+               			group1_path="${mean_path}/${group1_name}/${group1_name}_mean_counts.txt"
+                                group2_path="${mean_path}/${group2_name}/${group2_name}_mean_counts.txt"
+
+			else
+				fold_name="${group1_type}_${group1_treat}_from_${group2_time}_to_${group1_time}"
+				group2_path="${mean_path}/${group1_name}/${group1_name}_mean_counts.txt"
+               			group1_path="${mean_path}/${group2_name}/${group2_name}_mean_counts.txt"
+
+			fi
+
+			# Create directory for storing fold change results specific to this comparison if it doesn't exist.
+			[ ! -d "$fold_path" ] && mkdir "$fold_path"
+
+			# Calculate the fold change values using AWK, then sort and save the results.
+			awk '
+				BEGIN {FS="\t"}
+				NR==FNR {gene1_counts[$1"\t"$2"\t"$3"\t"$4]=$NF; next}
+				{fold_change=log(($NF+1)/(gene1_counts[$1"\t"$2"\t"$3"\t"$4]+1))/log(2);
+				 print $4"\t"$5"\t"fold_change}
+			' "$group1_path" "$group2_path" | sort -t$'\t' -k3,3nr > "${fold_path}"/"${fold_name}"_fold_changes.txt
+
+		# Second comparison situation: Different types, same treatment and time.
+		elif [[ "$group1_type" != "$group2_type" ]] && [[ "$group1_treat" == "$group2_treat" ]] && [[ "$group1_time" == "$group2_time" ]]
+		then
+			fold_path="./fold_changes/${group1_treat}_${group1_time}"
+
+			# Decide the direction of the fold based on type progression.
+			# Make sure that the direction is from a small type (like CLONE1) to a bigger one (like CLONE2)
+			if [[ "$group1_type" < "$group2_type" ]]
+			then
+				fold_name="${group1_treat}_${group1_time}_from_${group1_type}_to_${group2_type}"
+				group1_path="${mean_path}/${group1_name}/${group1_name}_mean_counts.txt"
+				group2_path="${mean_path}/${group2_name}/${group2_name}_mean_counts.txt"
+
+			else
+				fold_name="${group1_treat}_${group1_time}_from_${group2_type}_to_${group1_type}"
+				group2_path="${mean_path}/${group1_name}/${group1_name}_mean_counts.txt"
+				group1_path="${mean_path}/${group2_name}/${group2_name}_mean_counts.txt"
+
+			fi
+			# If there is a WT group then the fold direction is from WT to others.
+			if [[ "$group1_type" == "WT" ]]
+			then
+ 				fold_name="${group1_treat}_${group1_time}_from_${group1_type}_to_${group2_type}"
+   				group1_path="${mean_path}/${group1_name}/${group1_name}_mean_counts.txt"
+				group2_path="${mean_path}/${group2_name}/${group2_name}_mean_counts.txt"
+
+			elif [[ "$group2_type" == "WT" ]]
+			then
+				fold_name="${group1_treat}_${group1_time}_from_${group2_type}_to_${group1_type}"
+				group2_path="${mean_path}/${group1_name}/${group1_name}_mean_counts.txt"
+				group1_path="${mean_path}/${group2_name}/${group2_name}_mean_counts.txt"
+
+			fi
+
+			# Create directory for storing fold change results specific to this comparison if it doesn't exist.
+			[ ! -d "$fold_path" ] && mkdir "$fold_path"
+
+
+			# Calculate the fold change values using AWK, then sort and save the results.
+			awk '
+				BEGIN {FS="\t"}
+				NR==FNR {gene1_counts[$1"\t"$2"\t"$3"\t"$4]=$NF; next}
+				{fold_change=log(($NF+1)/(gene1_counts[$1"\t"$2"\t"$3"\t"$4]+1))/log(2);
+				print $4"\t"$5"\t"fold_change}
+			' "$group1_path" "$group2_path" | sort -t$'\t' -k3,3nr > "${fold_path}"/"${fold_name}"_fold_changes.txt
+
+		# Third comparison situation: Same type and time, different treatment.
+		elif [[ "$group1_type" == "$group2_type" ]] && [[ "$group1_treat" != "$group2_treat" ]] && [[ "$group1_time" == "$group2_time" ]]
+		then
+			fold_path="./fold_changes/${group1_type}_${group1_time}"
+
+			# Decide the direction of the fold based on treatment progression.
+			# Make sure that the direction is from UNINDUCED to INDUCED.
+			if [[ "$group1_treat" > "$group2_treat" ]]
+			then
+				fold_name="${group1_type}_${group1_time}_from_${group1_treat}_to_${group2_treat}"
+				group1_path="${mean_path}/${group1_name}/${group1_name}_mean_counts.txt"
+				group2_path="${mean_path}/${group2_name}/${group2_name}_mean_counts.txt"
+
+			else
+				fold_name="${group1_type}_${group1_time}_from_${group2_treat}_to_${group1_treat}"
+				group2_path="${mean_path}/${group1_name}/${group1_name}_mean_counts.txt"
+				group1_path="${mean_path}/${group2_name}/${group2_name}_mean_counts.txt"
+
+			fi
+
+			# Create directory for storing fold change results specific to this comparison if it doesn't exist.
+			[ ! -d "$fold_path" ] && mkdir "$fold_path"
+
+			# Calculate the fold change values using AWK, then sort and save the results.
+			awk '
+				BEGIN {FS="\t"}
+				NR==FNR {gene1_counts[$1"\t"$2"\t"$3"\t"$4]=$NF; next}
+				{fold_change=log(($NF+1)/(gene1_counts[$1"\t"$2"\t"$3"\t"$4]+1))/log(2);
+				print $4"\t"$5"\t"fold_change}
+			' "$group1_path" "$group2_path" | sort -t$'\t' -k3,3nr > "${fold_path}"/"${fold_name}"_fold_changes.txt
+
+		fi
+		# All the three situations have been considered.
+	done # End of the inner loop.
+done # End of the outer loop.
+
+echo "The fold change values have been calculated!"
+#### Conclude the fold change calculation process.
